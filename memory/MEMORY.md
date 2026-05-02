@@ -1,0 +1,5 @@
+- [User role](user_role.md) — PhD researcher on multi-teacher OPD + RL; uses Chinese; research-peer level
+- [OS project](project_os.md) — `/home/ubuntu/OS` is a planning/notes dir for the OPD+RL PhD idea, not a codebase
+- [OPSD blueprint](project_opsd_blueprint.md) — locked-in project plan: Qwen2.5-7B-Instruct unified base, 6 per-domain teachers, 4 stages
+- [OPSD stage status](project_opsd_stage_status.md) — live progress tracker (current: pre-Stage 1 redo on Qwen2.5)
+- [Autonomous execution preference](feedback_autonomous_execution.md) — when user delegates and goes offline, run end-to-end and persist state
