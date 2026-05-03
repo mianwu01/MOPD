@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.ipynb_checkpoints/
+
+# Logs and outputs (not source)
+logs/
+outputs/
+wandb/
+*.log
+
+# Local env / cache
+.cache/
+.claude/
+
+# Large data/models (keep parquet schemas elsewhere)
+*.safetensors
+*.bin
+*.ckpt

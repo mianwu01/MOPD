@@ -32,6 +32,27 @@ Why this beat the prior Qwen3-1.7B-Base plan:
 
 **Code GGUF alt**: `anshul6273/Qwen2.5-7B-Atcoder-Reasoning-v1-GGUF` exists but GGUF only — no safetensors → can't load via verl/transformers without conversion. Skip unless needed.
 
+# Empirical baseline KL (Control A, 2026-05-03)
+
+Measured `KL(student || teacher)` on response tokens of 16 representative prompts (8 math + 8 medqa), using student's greedy-generated responses. Method matches OPSD `losses.compute_reverse_kl_loss + _align_vocab` exactly. Saved to `MOPD/logs/control_a_kl.json`, analysis in `MOPD/logs/control_a_analysis.md`.
+
+| Teacher | KL on math | KL on medqa | Notes |
+|---|---:|---:|---|
+| vanilla-7b-instruct | 0.10 | 0.39 | size-effect baseline (1.5B vs 7B both Instruct) |
+| **math-yukang** | **37.0** | **43.8** | **OUTLIER — 400× further than peers** |
+| medical-umls (SFT) | 0.07 | 0.24 | Even closer than vanilla 7B (UMLS SFT shrunk size gap) |
+| search-searchr1 (GRPO) | 0.09 | 0.35 | Matches vanilla 7B |
+| tool-toolrl (GRPO) | 0.10 | 0.38 | Matches vanilla 7B |
+| code-svs (DAPO) | 0.10 | 0.37 | Matches vanilla 7B |
+
+**Reframed teacher landscape**:
+- Iter1's "80× math vs medical asymmetry" is **not** a "GRPO vs SFT" pattern. It's **specific to math-yukang**: extensive Open-R1 long-CoT GRPO rewrote the base distribution wholesale.
+- Other GRPO/DAPO teachers (search/tool/code) are nearly **indistinguishable from vanilla 7B-Instruct** on generic chat prompts. Their RL only changed task-specific output formats (`<search>` tags, tool calls, code blocks). On vanilla math/medqa prompts they look like base 7B.
+- Per-teacher loss normalization is needed **only when math-yukang is in the bag**. Iter2 with {search + tool + code + medical} (no math-yukang) might not need rescaling at all.
+- For paper framing: this is interesting on its own — distillation-time "teacher distance" depends heavily on which RL training was applied, not just whether RL was applied.
+
+**Backup plan if math-yukang continues to destabilize**: swap to `FutureMa/Qwen2.5-7B-Instruct-GRPO-Math` (smaller GRPO training on NuminaMath-TIR 500, expected lower KL — to be measured).
+
 # 4-stage plan
 
 | Stage | Goal | Status |
