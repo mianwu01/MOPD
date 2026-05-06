@@ -20,3 +20,8 @@ wandb/
 *.safetensors
 *.bin
 *.ckpt
+merged_ckpts/
+__pycache__/
+outputs/
+logs/*.log
+logs/*.pid

@@ -69,6 +69,7 @@ class OPDTrainer(RayPPOTrainer):
         self.opd_max_length = opd_cfg.get("max_length", 16384)
         self.test_freq = config.trainer.test_freq
         self.reward_beta = opd_cfg.get("reward_beta", None)
+        self.per_teacher_loss_norm = bool(opd_cfg.get("per_teacher_loss_norm", False))
         if self.reward_beta is not None and self.reward_beta <= 0:
             self.reward_beta = None
         apply_chat_template_kwargs = config.data.get("apply_chat_template_kwargs", {})
@@ -548,6 +549,7 @@ class OPDTrainer(RayPPOTrainer):
                     opd_batch.meta_info["opd_loss_type"] = self.loss_type
                     opd_batch.meta_info["opd_beta"] = self.beta
                     opd_batch.meta_info["opd_chunk_size"] = self.chunk_size
+                    opd_batch.meta_info["opd_per_teacher_loss_norm"] = self.per_teacher_loss_norm
                     if self.reward_beta is not None:
                         opd_batch.meta_info["opd_reward_beta"] = self.reward_beta
 

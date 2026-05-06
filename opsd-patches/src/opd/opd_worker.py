@@ -92,6 +92,12 @@ class OPDWorker(AsyncActorRolloutRefWorker):
         self._teacher_modules: dict = {}
         self._teacher_for_data_source: dict[str, str] = {}
         self._default_teacher_name: str | None = None
+        # Per-teacher loss EMA for gradient-magnitude normalization. Active iff
+        # config.actor.opd_per_teacher_loss_norm=True. Avoids large-loss teachers
+        # (e.g. SearchR1's KL ~1.3) from dominating gradients vs small-loss
+        # teachers (e.g. medical ~0.5, code ~0.2).
+        self._teacher_loss_ema: dict[str, float] = {}
+        self._teacher_loss_ema_decay: float = 0.9
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
@@ -398,6 +404,7 @@ class OPDWorker(AsyncActorRolloutRefWorker):
                 loss_type=loss_type, beta=beta, chunk_size=chunk_size,
                 use_remove_padding=use_remove_padding, device=device, batch_size=batch_size,
                 use_sample_weights=use_sample_weights,
+                per_teacher_loss_norm=bool(data.meta_info.get("opd_per_teacher_loss_norm", False)),
             )
 
             lr = self.actor_lr_scheduler.get_last_lr()[0]
@@ -429,6 +436,7 @@ class OPDWorker(AsyncActorRolloutRefWorker):
         device: int = 0,
         batch_size: int = 0,
         use_sample_weights: bool = False,
+        per_teacher_loss_norm: bool = False,
     ) -> dict:
         """Core OPD training with pre-computed teacher logits.
 
@@ -558,7 +566,16 @@ class OPDWorker(AsyncActorRolloutRefWorker):
                 token_entropy = entropy_from_logits_with_chunking(student_logits.float(), chunk_size=chunk_size)
                 total_entropy_sum += token_entropy.sum().item()
 
-            scaled_loss = loss / grad_accum
+            # Optional per-teacher loss normalization: divide loss by EMA so each
+            # teacher contributes equal gradient magnitude (after grad_clip).
+            # First step uses raw loss; EMA bootstraps from step-end stats below.
+            do_norm = per_teacher_loss_norm
+            if do_norm and teacher_name in self._teacher_loss_ema:
+                tnorm = max(float(self._teacher_loss_ema[teacher_name]), 0.05)
+                scale_factor = 1.0 / tnorm
+            else:
+                scale_factor = 1.0
+            scaled_loss = (loss * scale_factor) / grad_accum
             scaled_loss.backward()
             _mem2(f"phase2-mb{i}-after-backward")
 
@@ -618,10 +635,19 @@ class OPDWorker(AsyncActorRolloutRefWorker):
         # Per-teacher loss/token breakdown — multi-teacher diagnostics. In
         # single-teacher mode (teacher_name=='__primary__') this still emits a
         # single bucket; harmless and useful for sanity-checking.
+        # Update per-teacher EMA from this step's observations (used next step).
+        decay = float(self._teacher_loss_ema_decay)
         for tname, (lsum, ntok, nmb) in per_teacher_stats.items():
+            avg = lsum / max(1, nmb) if nmb > 0 else None
             out[f"opd/loss/{tname}"] = lsum / max(1, nmb)
             out[f"opd/num_tokens/{tname}"] = int(ntok)
             out[f"opd/num_micro_batches/{tname}"] = int(nmb)
+            if avg is not None and nmb > 0:
+                if tname in self._teacher_loss_ema:
+                    self._teacher_loss_ema[tname] = decay * self._teacher_loss_ema[tname] + (1.0 - decay) * avg
+                else:
+                    self._teacher_loss_ema[tname] = avg
+                out[f"opd/loss_ema/{tname}"] = self._teacher_loss_ema[tname]
         return out
 
     def _extract_response_target_ids_padded(self, input_ids, loss_mask):
