@@ -80,3 +80,23 @@ The user has been driving decisions tightly through this conversation. They'll w
 - Verify claims (especially HF model availability, base-model lineage) — don't trust upstream metadata blindly
 - Persist state in memory + tasks so the next session doesn't have to re-discover anything
 - Communicate concisely in Chinese; treat the user as a peer with deep LLM RL knowledge
+
+---
+
+## 2026-07 update — KDFlow-based restart
+
+The single-teacher instability on the opsd/verl fork (Stage 2) motivated restarting the
+on-policy multi-teacher work on a **known-good engine, KDFlow** (vendored under `KDFlow/`,
+see `KDFlow_UPSTREAM.md`). Entry points for the new direction:
+
+- **`MOPD_HANDOFF.md`** — the working brief: goal (geometry-aware per-domain gradient
+  aggregation vs Euclidean weighted sum), phased plan with hard gates, pitfalls.
+- **`NOTES_kdflow_combine_point.md`** — the exact gradient combine point in KDFlow's
+  on-policy trainer where the Phase-3 weighting baseline and Phase-4 decoupled aggregation
+  plug in (`KDFlow/kdflow/ray/train/student_actor.py:286-327`).
+- **`scripts/kl_screen.py`** — teacher screening by reverse-KL on neutral prompts
+  (far-teacher collapse guard; Gate-A prerequisite).
+
+Prior verl-fork work (`opsd-patches/`, `build_*`, `eval_*`, `notes/`, `memory/`) is retained
+for reference — notably `opsd-patches/src/opd/stratified_sampler.py` and
+`test_vocab_align.py`, which the KDFlow port reuses.

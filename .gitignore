@@ -25,3 +25,10 @@ __pycache__/
 outputs/
 logs/*.log
 logs/*.pid
+
+# --- 2026-07 KDFlow restart additions ---
+output/
+KDFlow/output/
+KDFlow/build/
+runs/
+*.whl
