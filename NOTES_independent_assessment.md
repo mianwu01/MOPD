@@ -236,6 +236,83 @@ scaled-up diagnosis; it is not publishable as a bare null.
    in-loop; on outer-loop deltas, normalization + TA (and TIES as ablation) is meaningful. ×c is
    a no-op in-loop; on deltas it is exactly OrthoMerge's regime.
 
+---
+
+# Addendum (2026-07-10, after user clarification): the intended method is OFT-in-the-OPD-loop — this changes the assessment
+
+**Clarification received:** the idea is to migrate OFT / orthogonal methods from *weight merging*
+to *multi-teacher OPD training time*. Weiyang is on board, reports a prior small experiment
+applying OFT to OPD **worked**, and suggests FDA can help.
+
+## What this changes
+
+**Finding 2 (per-step collapse) no longer kills the intended method.** That finding applies to
+aggregating raw per-step gradients. Per-domain **OFT rotations trained inside the OPD loop are
+O(1) objects far from identity** — the verifier explicitly scoped them out of the collapse: on
+accumulated rotations, so(d) averaging ≠ Euclidean averaging, and the ×c correction has real
+content. This is the "iterated OrthoMerge trainer" variant the steelman lens flagged as *the only
+in-loop object where OrthoMerge's math applies natively*. The clarified project = that variant.
+
+**The motivation shifts from "resolve conflict" to "isolate, then consolidate."** With per-domain
+rotations R_d, each domain's OPD loss updates only its own R_d — there is *no cross-domain
+gradient interference during accumulation at all*; conflict is deferred to the merge, where the
+geometry is principled. This sidesteps the "see-saw never observed" problem as a *motivation*
+(the method doesn't need per-step conflict to exist), though it sharpens the *bar*: naive mixed
+full-parameter OPD already gets 5/5 domains positive, so the OFT-merge method must match the mean
+and beat the min with strictly less expressivity.
+
+**FDA now type-checks.** Per-domain OFT branches of the *student* define genuine student-space
+task objects (R_d, or W_d − W₀). FDA anchors can be synthesized in student space against the
+student's own branches — coherent uses: (i) joint adaptation data for the merged student after
+each merge (data-free complement to on-policy rollouts), (ii) replay/anti-forgetting data for
+suppressed domains between merges.
+
+## The architecture, made concrete
+
+Per layer: freeze W₀ (student), per-domain R_d via Cayley–Neumann (OFTv2, block-diagonal).
+Each domain's rollouts scored by its teacher (reverse-KL) update only R_d. Every K steps:
+inverse-Cayley → Q_d ∈ so(d) → average → ×c = Σ‖Q_d‖/‖ΣQ_d‖ → Cayley → R_merged; re-branch
+(fold R_merged into W₀, reset R_d ≈ I). Final model = merged student.
+
+**Two design forks that determine novelty and difficulty — get Weiyang's intent:**
+1. **Merge cadence.** Merge once at the end = OrthoMerge applied to OPD-trained experts (novelty
+   shrinks to "experts trained by OPD"; also the experts drift apart, exactly post-hoc merging's
+   weakness). **Iterated merge/re-branch (K ~ tens of steps) is the genuinely new in-loop object**
+   and keeps branches close (better merge quality, closer to on-policy for the merged model).
+   Neighbors to cite/differentiate: ColD Fusion/DIMAT/MERIT (iterated train-merge), CaMOPD.
+2. **Rollout policy.** Branch-local rollouts (W_d) are cleanly on-policy per branch but the merged
+   model is off-policy at merge points; rolling out from the merged model each round restores
+   on-policyness at the cost of engine weight-swaps. KDFlow engineering: this lives *above* the
+   combine point (round boundary), avoiding the non-domain-pure micro-batch surgery entirely.
+
+## What still stands from the main assessment
+
+1. **Capacity/headroom is now the #1 risk** (was Finding 7): rotations are spectrum-preserving;
+   a 1.5B student absorbing 4–5 domains through R_d only may underfit vs full-param OPD. The
+   *decisive first experiment* is therefore **Gate A′: single-teacher OFT-OPD vs full-param OPD
+   parity** on one domain. Ask Weiyang for the prior experiment's details (scale,
+   single-vs-multi-teacher, what metric improved, vs what baseline) — if it already shows parity
+   at comparable scale, Gate A′ is pre-cleared.
+2. **All measurement fixes**: teacher-native templates/system prompts; the math teacher's 4k
+   context overrun; paired per-problem evals; matched-budget ceilings; regenerate baselines on
+   KDFlow (engine-migration hole).
+3. **The honest ablation set** (what makes any win attributable): (i) naive mixed full-param OPD
+   with tuned weights; (ii) per-domain LoRA/full branches merged with TA/TIES — is *orthogonality*
+   doing the work, or just branch-merge?; (iii) OFT branches merged with plain averaging of Q_d —
+   is ×c/so(d) doing the work?; (iv) CaMOPD-style alternating updates (cheapest competitor).
+4. **min-over-domains stats and pre-registered gates** as before.
+
+## Revised minimal path
+
+1. Gate A′: 1 domain, OFT-OPD vs full-param OPD (capacity check) — on the fixed measurement layer.
+2. 2-domain head-to-head: iterated OFT-branch-merge vs tuned naive mixed OPD vs LoRA-branch-TIES,
+   paired evals, K swept coarsely.
+3. Offline pre-test stays valid and even more natural: train per-domain OFT branches once, merge
+   offline with so(d)+×c vs plain-average vs TA — one day, tests the merge math before any
+   iterated-loop engineering.
+4. FDA arm only after (2) shows the merge preserves per-domain gains: student-space anchors for
+   post-merge joint adaptation.
+
 ## Honest limitations of this assessment
 
 Iter2's all-positive result is one 80-step, single-seed run — long-horizon see-saw is not ruled
