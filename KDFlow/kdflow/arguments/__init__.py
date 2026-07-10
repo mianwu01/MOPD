@@ -111,7 +111,28 @@ def init_args(scenario: str = "sft"):
                 "Multi-teacher distillation currently only supports `vanilla_kd`, "
                 f"got `{args.kd.kd_algorithm}`."
             )
-    
+
+    for attr in ("teacher_loss_weights", "teacher_max_len"):
+        raw = getattr(args.kd, attr)
+        if raw is None:
+            continue
+        if args.kd.multi_teacher_config is None:
+            raise ValueError(f"`--{attr}` requires `--multi_teacher_config`.")
+        try:
+            with open(raw, "r", encoding="utf-8") as f:
+                parsed = json.load(f)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"`--{attr}` must be a valid JSON file: {raw}") from e
+        if not isinstance(parsed, dict):
+            raise ValueError(f"`--{attr}` must be a JSON object mapping routing keys to numbers.")
+        unknown = set(parsed) - set(args.kd.multi_teacher_config)
+        if unknown:
+            raise ValueError(
+                f"`--{attr}` contains keys not present in multi_teacher_config: {sorted(unknown)}"
+            )
+        setattr(args.kd, attr, {k: float(v) for k, v in parsed.items()})
+
+
     if scenario == "on_policy_kd":
         if total_gpus % args.rollout.rollout_tp_size != 0:
             raise ValueError(

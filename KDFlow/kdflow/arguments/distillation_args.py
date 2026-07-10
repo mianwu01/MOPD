@@ -76,6 +76,19 @@ class DistillationArguments:
         default=None,
         metadata={"help": "Path to the JSON file of the routing key and name_or_path of multiple teacher models."}
     )
+    teacher_loss_weights: str = field(
+        default=None,
+        metadata={"help": "Path to a JSON file mapping routing key -> per-domain KD loss weight "
+                          "(multi-teacher only). Tokens of samples routed to a teacher are scaled "
+                          "by its weight before reduction. Missing keys default to 1.0."}
+    )
+    teacher_max_len: str = field(
+        default=None,
+        metadata={"help": "Path to a JSON file mapping routing key -> max trained context length "
+                          "of that teacher (multi-teacher only). KD loss is zeroed for token "
+                          "positions at or beyond the cap, so a teacher is never asked to score "
+                          "tokens outside its trained positional range (e.g. Qwen2.5-Math: 4096)."}
+    )
     # DSKD hyperparameters
     dskd_token_align: str = field(
         default="eta",

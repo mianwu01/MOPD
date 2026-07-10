@@ -63,6 +63,8 @@ class DistillModel(nn.Module):
         
         # LoRA
         if self.args.model.lora_rank > 0:
+            if getattr(self.args.model, "oft_block_size", 0) > 0:
+                raise ValueError("lora_rank and oft_block_size are mutually exclusive.")
             # https://github.com/huggingface/peft/issues/137
             self.model.enable_input_require_grads()
             lora_config = LoraConfig(
@@ -74,6 +76,20 @@ class DistillModel(nn.Module):
                 bias="none",
             )
             self.model = get_peft_model(self.model, lora_config)
+
+        # OFT (orthogonal finetuning): W = R @ W0 with R block-diagonal orthogonal.
+        # Used for the Gate-A' capacity check and for V1 branches whose rotations
+        # merge natively in so(d) (see mopd_merge).
+        elif getattr(self.args.model, "oft_block_size", 0) > 0:
+            from peft import OFTConfig  # requires peft >= 0.11
+            self.model.enable_input_require_grads()
+            oft_config = OFTConfig(
+                task_type=TaskType.CAUSAL_LM,
+                oft_block_size=self.args.model.oft_block_size,
+                target_modules=self.args.model.target_modules,
+                module_dropout=self.args.model.oft_module_dropout,
+            )
+            self.model = get_peft_model(self.model, oft_config)
 
         self.tokenizer = get_tokenizer(model_name_or_path, self.model)
 

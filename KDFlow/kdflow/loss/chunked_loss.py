@@ -16,12 +16,16 @@ def chunked_loss(
     reduction: str = "none",
     metric_fns: Optional[Union[Callable, List[Callable]]] = None,
     return_metrics: bool = False,
+    token_weights: Optional[torch.Tensor] = None,
     **kwargs: Any,
 ):
     """Compute loss chunk by chunk without materializing full logits.
 
     Inputs are expected to be token-level tensors, e.g. [num_tokens, hidden_size].
     Loss is computed per chunk with reduction="none" and reduced globally here.
+    token_weights: optional [num_tokens] scalar weight per token (e.g. per-teacher
+    loss weights or teacher-context masking); applied before reduction. Metrics
+    are intentionally left unweighted.
     """
     if reduction not in ("none", "sum", "mean"):
         raise ValueError(f"Unsupported reduction: {reduction}")
@@ -60,6 +64,8 @@ def chunked_loss(
 
         chunk_loss = loss_fn(student_logits, target, reduction="none", **kwargs)
         chunk_tokens = chunk_loss.numel()
+        if token_weights is not None:
+            chunk_loss = chunk_loss * token_weights[start:end].to(chunk_loss)
         if metric_fns is not None and has_teacher_logits:
             fns = metric_fns if isinstance(metric_fns, list) else [metric_fns]
             for fn in fns:

@@ -1,0 +1,7 @@
+{
+  "math": "Qwen/Qwen2.5-Math-7B-Instruct",
+  "medical": "FreedomIntelligence/HuatuoGPT-o1-7B",
+  "code": "RLVR-SvS/SvS-Qwen-Code-7B",
+  "search": "PeterJinGo/SearchR1-nq_hotpotqa_train-qwen2.5-7b-it-em-grpo-v0.3",
+  "tool": "emrecanacikgoz/Qwen2.5-7B-Instruct-ToolRL-grpo-cold"
+}

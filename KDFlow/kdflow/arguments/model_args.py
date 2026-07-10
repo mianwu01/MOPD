@@ -34,6 +34,17 @@ class ModelArguments:
     lora_dropout: float = field(
         default=0.0,
     )
+    oft_block_size: int = field(
+        default=0,
+        metadata={"help": "Enable OFT (orthogonal finetuning) on the student with this block size "
+                          "(0 = disabled). The student trains block-diagonal orthogonal rotations "
+                          "R per target module (W = R @ W0, Cayley-parameterized) instead of raw "
+                          "weights. Mutually exclusive with lora_rank."}
+    )
+    oft_module_dropout: float = field(
+        default=0.0,
+        metadata={"help": "OFT module dropout."}
+    )
     disable_fast_tokenizer: bool = field(
         default=False
     )

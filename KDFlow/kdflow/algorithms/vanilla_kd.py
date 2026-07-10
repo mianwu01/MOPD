@@ -51,6 +51,36 @@ class VanillaKD:
 
         return torch.cat([x for x in logits_list if x is not None], dim=0)
 
+    def _build_token_weights(self, loss_mask, routing_keys):
+        """Per-token scalar weights aligned to the rows of `hidden[loss_mask]`.
+
+        Combines (a) per-teacher loss weights (--teacher_loss_weights) and
+        (b) per-teacher context caps (--teacher_max_len): tokens at absolute
+        positions >= a teacher's cap contribute zero KD loss, so a teacher is
+        never scored beyond its trained positional range. Returns None when
+        neither knob is configured.
+        """
+        weights_cfg = getattr(self.args.kd, "teacher_loss_weights", None)
+        maxlen_cfg = getattr(self.args.kd, "teacher_max_len", None)
+        if not weights_cfg and not maxlen_cfg:
+            return None
+        bsz, seq_len = loss_mask.shape
+        w = torch.ones(bsz, seq_len, dtype=torch.float32, device=loss_mask.device)
+        if weights_cfg:
+            per_sample = torch.tensor(
+                [float(weights_cfg.get(k, 1.0)) for k in routing_keys],
+                dtype=torch.float32, device=loss_mask.device,
+            )
+            w = w * per_sample.unsqueeze(1)
+        if maxlen_cfg:
+            pos = torch.arange(seq_len, device=loss_mask.device).unsqueeze(0)
+            caps = torch.tensor(
+                [int(maxlen_cfg.get(k, 1 << 30)) for k in routing_keys],
+                device=loss_mask.device,
+            ).unsqueeze(1)
+            w = w * (pos < caps).float()
+        return w[loss_mask]
+
     def training_step(self, micro_batch):
         student_input_ids = micro_batch["stu_input_ids"]
         student_attn_mask = micro_batch["stu_attn_mask"]
@@ -82,10 +112,14 @@ class VanillaKD:
             teacher_logits_fn = lambda start, end: self.compute_multi_teacher_logits(
                 teacher_hiddens, teacher_loss_mask, micro_batch["teacher_routing_key"], start, end
             )
+            token_weights = self._build_token_weights(
+                student_loss_mask, micro_batch["teacher_routing_key"]
+            )
             kd_loss, metric_sums = chunked_loss(
                 student_hiddens, self.student.model.lm_head, self.loss_fn,
                 teacher_logits_fn=teacher_logits_fn, chunk_size=chunk_size, reduction="sum",
                 metric_fns=self.metric_fns, return_metrics=True,
+                token_weights=token_weights,
             )
         else:
             teacher_hiddens = teacher_hiddens.to(self.teacher_lm_head.weight)
