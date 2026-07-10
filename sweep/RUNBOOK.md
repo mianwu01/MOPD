@@ -112,6 +112,14 @@ multi-teacher baselines, all 8 merged models. Emit per-problem JSONL
 python3 sweep/paired_compare.py --a results/v2_ord_math500.jsonl --b results/ta_math500.jsonl
 ```
 Decision rules (pre-registered):
+- **Matched-budget ceilings (weak-see-saw accounting)**: the multi-teacher run
+  (bs 320, ~64/domain/step × 80 = ~5,120 samples/domain) is compared against
+  each branch's **step-40** snapshot (128 × 40 = 5,120) — same per-domain
+  budget. Recovery_d = multi_d / branch_d@40. Branch step-80 (10,240) is
+  reported as the 2×-budget ceiling. A "weak see-saw" claim = recovery
+  significantly < 1 under paired stats; comparing multi against a full-budget
+  or multi-epoch solo run (e.g. a v10g-style 4-epoch number) conflates
+  interference with data dilution and is not evidence.
 - **Gate A′**: OFT branch within ~1–2pp of full-param branch on its own domain,
   else rotation-only capacity is the binding constraint → tell Weiyang.
 - **Bake-off**: if no geometric op beats `plain_avg`/`ta` (paired, 95%) on

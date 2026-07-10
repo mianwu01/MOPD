@@ -27,9 +27,16 @@ RUN_TAG=${RUN_TAG:-uniform}
 RUN_NAME="mt_${RUN_TAG}_lr${LR}"
 SAVE_PATH="${SAVE_ROOT}/${RUN_NAME}"
 
+# bs 320 with 5 domains ~= 64 samples/domain/step, so 80 steps gives each
+# domain ~5,120 samples — matching a bs-128 branch at its step-40 snapshot.
+# That branch snapshot is the MATCHED-BUDGET ceiling; the step-80 snapshot is
+# the 2x-budget ceiling. Without this, "recovery vs ceiling" confounds
+# interference with data dilution (weak-see-saw measurement is invalid).
+TRAIN_BS=${TRAIN_BS:-320}
+
 OPTS=""
 OPTS+=" --num_nodes 1 --num_gpus_per_node ${GPUS} --backend fsdp2"
-OPTS+=" --train_batch_size 128 --micro_train_batch_size 8"
+OPTS+=" --train_batch_size ${TRAIN_BS} --micro_train_batch_size 8"
 OPTS+=" --learning_rate ${LR} --lr_warmup_ratio 0.05 --num_epochs 1"
 OPTS+=" --save_path ${SAVE_PATH} --save_steps ${SAVE_STEPS}"
 OPTS+=" --bf16 True --gradient_checkpointing True --enable_sleep True"
