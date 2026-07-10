@@ -313,6 +313,66 @@ inverse-Cayley → Q_d ∈ so(d) → average → ×c = Σ‖Q_d‖/‖ΣQ_d‖ �
 4. FDA arm only after (2) shows the merge preserves per-domain gains: student-space anchors for
    post-merge joint adaptation.
 
+---
+
+# Addendum 2 (2026-07-10): Weiyang's decomposition recipe, made precise
+
+**Guidance relayed:** orthogonalize the per-domain signal (OFT, Muon, or his tool that finds the
+nearest orthogonal matrix), then decompose into direction (polar coordinates, aggregated on the
+manifold) and magnitude (aggregated linearly, TA-style).
+
+**What this is:** the nearest orthogonal matrix to A (Frobenius) is its polar factor
+Q = UVᵀ from A = USVᵀ — matrix "polar coordinates" A = Q·H (Q = angle, H = VSVᵀ ⪰ 0 = radius).
+Muon/NS computes Q iteratively; the Procrustes/SVD solve computes it exactly; OFT parameterizes it
+directly. This recipe is OrthoMerge's **Orthogonal-Residual Decoupling** transplanted to per-domain
+OPD deltas at merge points. Three concrete instantiations:
+
+- **V1 — OFT branches (direction by construction).** Per-domain R_d trained in-loop; no magnitude
+  channel exists (pure rotation). Merge: so(d) average + ×c. Cleanest math; capacity risk
+  (spectrum-preserving only).
+- **V2 — full-param branches + ORD (recommended; matches the description).** Per domain, solve
+  R_d = polar(W_d·W₀ᵀ) (nearest rotation taking W₀ toward W_d), residual E_d = W_d − R_d·W₀.
+  Direction channel: so(d)-average the R_d with ×c. Magnitude channel: TA/TIES on the E_d.
+  Recompose W_new = R_merged·W₀ + Σλ_d·E_d. Keeps full expressivity (residual carries content),
+  uses the Procrustes tool directly, and R_d is guaranteed near-identity (see landmine below).
+- **V3 — polar of the delta (Muon-flavored).** Q_d = NS(ΔW_d), H_d = magnitude. Note polar() is
+  scale-invariant — polar(cA) = polar(A) — so this is genuinely non-degenerate even for small
+  deltas (the per-step collapse critique does NOT apply). Recompose ΔW = Q_merged·H̄ with
+  H̄ = Σλ_d H_d (SPD cone is convex; linear averaging valid). BUT see landmine.
+
+**Landmine — the near-identity requirement.** so(d)/Cayley averaging is only defined for
+rotations near I with det = +1. OFT rotations (V1) and ORD rotations of nearby checkpoints (V2)
+satisfy this automatically. **polar(ΔW) does not**: the polar factor of an update matrix is
+generically FAR from I and can have det = −1 (not even in SO(d) — no skew logarithm exists).
+V3's directions cannot be Lie-algebra-averaged as-is; they'd need a Karcher mean on the orthogonal
+group (expensive, non-unique between components). This is a decisive argument for **V2 (or V1)
+over V3** as the primary build — raise with Weiyang.
+
+**Other fine print:**
+- Rectangular matrices (MLP up/down, lm_head): keep R square on the output side (R·W₀, like OFT)
+  so the group structure survives; polar factors of rectangular deltas are only semi-orthogonal
+  (Stiefel, no group).
+- "Magnitude = TA" must be pinned: scalar norms vs SPD factor H vs residual E are three different
+  methods. Scalar-only discards the spectral shape (likely hurts); TA-on-residual is the
+  OrthoMerge-sanctioned reading; SPD-average is the clean V3 form.
+- Noise: polar amplifies the tail of a noisy delta's spectrum (all directions → weight 1).
+  Merge at K-step round boundaries with K chosen so ‖ΔW‖ clears the split-half noise floor
+  (reuse the Addendum-1 diagnostics to pick K).
+- Compute is a non-issue at round cadence: exact SVD polar on 1.5B-scale matrices is seconds/GPU,
+  NS is faster; only per-step cadence would be costly.
+- ×c lives on the rotation average (undoing cancellation in so(d)); λ_d/normalization lives on
+  the magnitude channel — consistent with brief §4's "normalize, don't ×c" note, each channel
+  gets its own treatment.
+
+**Updated offline bake-off arms** (still the right first experiment; one day): plain delta
+average / TA / TIES / V1 (if OFT branches) / V2-ORD / V3-polar — plus direction-only and
+magnitude-only ablations of V2 to attribute any win to a channel.
+
+**For Weiyang:** (1) which tool did he mean — the OrthoMerge release's Procrustes solve, or the
+Muon/NS kernel? (2) confirm V2 (ORD on branch weights) vs V3 (polar of deltas) — the det/-far-from-I
+issue makes them materially different; (3) in his successful OFT+OPD experiment, was the merge
+so(d)+×c or something simpler?
+
 ## Honest limitations of this assessment
 
 Iter2's all-positive result is one 80-step, single-seed run — long-horizon see-saw is not ruled
