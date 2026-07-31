@@ -1,0 +1,346 @@
+# Critical reflection on MOPD (2026-07-31): the toy-task standard, the ORBIT evidence, and the execution gap
+
+*Triggered by three inputs: (1) the advisor asked about the earlier OFT validation experiment
+("How did you approach it at the time?" / "How well did it work?"); (2) Kwanyoung Park's
+methodology advice — identify the best possible toy task on which the idea SHOULD work, and
+implement the most minimal version that captures the core hypothesis; (3) the ORBIT result
+itself, which is absent from this repo but bears directly on Gate A′. Produced by a multi-lens
+review (3 evidence readers over KDFlow internals / project history / sweep toolkit → 4
+independent critique lenses); the separate adversarial-verification pass was skipped by request,
+but every load-bearing code claim below was re-verified by direct file reads, and the single
+most consequential one (the PEFT sync break) was independently re-read a second time.*
+
+---
+
+## TL;DR
+
+1. **The pre-registered Gate A′ cannot produce a valid number as things stand.** KDFlow's
+   rollout weight-sync is PEFT-unaware: an OFT (or LoRA) student streams raw
+   `base_model.model.*`-prefixed adapter state to SGLang with no merge and no key remap. The
+   run either crashes at the first sync or — worse — the engines silently serve the frozen base
+   policy π₀ forever while the trainer moves the adapters. Fix before any OFT branch launches.
+2. **The ORBIT finding (OFT ≈ LoRA accuracy, OFT > LoRA train–inference mismatch) lands on a
+   compound instrumentation hole**: the repo has zero train-vs-rollout consistency
+   instrumentation, no LoRA branch arm, and a Gate A′ decision rule that attributes any OFT
+   deficit solely to capacity. The probe is ~3 small edits with zero extra forward passes.
+3. **The project still has no toy task in the Park sense.** The smallest end-to-end experiment
+   the toolkit supports is 8×H100 at 1.5B/7B; `demo_synthetic.py` checks that the merge code
+   *executes*, not that geometry *helps* anywhere. The forced-conflict positive control — which
+   the independent assessment demanded but the RUNBOOK never scheduled — should be promoted to
+   the primary toy testbed, at ORBIT scale (0.5B student / 1.5B teachers), run **before** the
+   fleet.
+4. **Reflection freeze.** This is the third analysis document produced since the last GPU
+   number (2026-05-06). Its marginal value is the three items above; beyond them, every open
+   question is empirical. No further assessment documents until the first KDFlow-era GPU
+   numbers are committed.
+
+---
+
+## 1. The ORBIT experiment, recast — the answers for the advisor
+
+Prior experiment (external to this repo; W&B `sunday-hao/opd-test-20epoch`): sampled-token OPD
+under the ORBIT framework, GSM8K, student Qwen2.5-0.5B-Instruct, teacher Qwen2.5-1.5B-Instruct,
+OFT vs LoRA at approximately matched trainable parameters.
+
+**"How did you approach it at the time?"** As a deliberately minimal capacity probe — the Park
+methodology applied before hearing it named: smallest student/teacher pair in the family,
+easiest verifiable dataset, one isolated variable (the adapter parameterization), everything
+else held fixed. That framing is honest and it positions the run as Phase 0 of MOPD rather than
+a shelved side project.
+
+**"How well did it work?"** Report two results and let the second carry the weight:
+
+- **Capacity:** OFT reached roughly LoRA-comparable accuracy at matched trainable parameters.
+  This is small-scale evidence that Gate A′ will likely pass on the capacity axis — a *partial*
+  pre-clearance only, because the pre-registered gate compares OFT against its **full-param**
+  twin (RUNBOOK Stage 6), not against LoRA.
+- **The transferable discovery:** OFT exhibited a **larger train–inference mismatch** than LoRA
+  — a divergence between the rollout engine's view of the policy and the trainer's view. This
+  is a risk dimension the entire MOPD plan currently neither anticipates nor measures
+  (§3 below), and in KDFlow the mechanism turns out to be worse than ORBIT's (§2).
+
+State the limitations unprompted: single setting, single seed, GSM8K is easy for this family,
+0.5B/1.5B may not predict 1.5B/7B, the comparator was LoRA rather than full-param, and the
+mismatch was measured under ORBIT's serving stack, not KDFlow's.
+
+Strategic consequence for the Weiyang meeting: this replaces "waiting on Weiyang's OFT
+small-test details" (MOPD_HANDOFF.md §8) with our own first-hand evidence on the same question.
+Never let someone else's undocumented experiment be a load-bearing de-risking element when you
+possess your own data — present the recast + the toy results (§4) as the agenda, and ask
+Weiyang to falsify the revised Gate A′, not to supply missing reassurance.
+
+---
+
+## 2. Finding R1 — KDFlow's PEFT rollout sync is broken; Gate A′ as planned yields garbage
+
+Verified by direct reads (twice, independently):
+
+- Rollouts are generated by SGLang HTTP servers; after each rollout batch is distilled, the
+  trainer streams the student's **entire state_dict** into the engines
+  (`kdflow/ray/train/student_actor.py:418-426` → 
+  `kdflow/backend/fsdp/fsdp_strategy.py:514-556`), so iteration *k* samples from end-of-*k−1*
+  weights — on-policy at one-iteration granularity. Good.
+- But `_unwrap_model` (`fsdp_strategy.py:339-345`) unwraps only `.module` and `DistillModel` —
+  **never `PeftModel`**. For an OFT/LoRA student (`kdflow/models/model.py:64-92` rebinds
+  `self.model = get_peft_model(...)`), `state_dict()` yields peft-prefixed keys
+  (`base_model.model.…base_layer.weight`, `…lora_A.default.weight`, `…oft_r…`) which are
+  streamed **verbatim** to SGLang. There is no merge, no key remap, no adapter-aware branch
+  anywhere in the online path — `get_peft_model_state_dict` is imported (`fsdp_strategy.py:12`)
+  but never called; `merge_and_unload` exists only in the offline `sweep/materialize_peft.py`.
+  The SGLang servers are launched with no adapter-serving options.
+- Outcome depends on the pinned SGLang's `load_weights` strictness (unverifiable without a
+  GPU — this caveat is real): either a crash at the first sync, or the poisonous branch —
+  SGLang warn-skips every unrecognized tensor and the engines **silently serve frozen π₀ for
+  the entire run** while the trainer trains the adapters. Loss curves would move; evals would
+  drift slightly; nothing would error. *Treat "the OFT branch ran fine" as a red flag, not
+  reassurance, until the fix lands.*
+- The RUNBOOK's "verified in the dev container" (RUNBOOK.md:9-13) is honest and explicitly
+  excludes this GPU-only path. The codebase is peft-aware for **checkpoints**
+  (`fsdp_strategy.py` save path special-cases PeftModel) but not for the rollout sync — which
+  is exactly why it slipped through.
+
+**Fix (before any OFT/LoRA launch):** materialize-merge-per-sync — fold `R@W0` (or add `BA`)
+into base-named fp32 tensors on the trainer (masters are already fp32) and stream them through
+the existing `weight_source` substitution hook in `update_rollout_weights_from_tensor`
+(`fsdp_strategy.py:517`, already in the signature); add an assertion that every streamed key
+exists in the engine's model, treating a nonzero skip count as fatal. This one fix repairs the
+path, equalizes engine-side conditions across arms, and rescues V1's on-policyness in a single
+move. A 10-minute single-GPU smoke test (one sync, one probe read) settles the crash-vs-skip
+question empirically.
+
+This is the second time the project has built infrastructure whose hypothesis-critical path was
+never end-to-end exercised (the first: multi-teacher routing launched the night of 2026-05-02,
+before any single-teacher control existed). The pattern, not the bug, is the lesson — see §6.
+
+---
+
+## 3. Finding R2 — the mismatch instrumentation hole, the Gate A′ confound, the missing LoRA arm
+
+**Nothing in the repo measures train-vs-rollout consistency.** The rollout request never sets
+`return_logprob`; every sample carries a hard-coded `"rollout_log_probs": None` placeholder
+(`kdflow/trainer/on_policy_kd_trainer.py:465`) that is never filled or consumed; logged metrics
+are teacher-vs-student only. A grep for mismatch/importance across `sweep/` returns nothing.
+There is also no importance weighting anywhere, so any engine–trainer gap biases the on-policy
+KD gradient silently.
+
+**Gate A′ is confounded as pre-registered.** The decision rule — "OFT within ~1-2pp of
+full-param on its own domain, else rotation-only capacity is the binding constraint → tell
+Weiyang" (RUNBOOK.md:122-124) — admits exactly one cause of failure. But the OFT arm differs
+from its twin in two ways at once: capacity (hypothesis-relevant) and on-policyness (nuisance,
+and per ORBIT larger for OFT even after the sync is fixed). Reporting "capacity is binding" off
+a run that fails the mismatch check would be a false attribution to a collaborator.
+
+**The probe is nearly free** (~3 small edits, zero extra forward passes):
+1. `"return_logprob": true` in the `/generate` payload
+   (`kdflow/ray/rollout/rollout_group.py:376-379`) — SGLang returns
+   `meta_info.output_token_logprobs` for sampled tokens at no extra compute;
+2. thread them through the existing `rollout_log_probs` placeholder;
+3. a `metric_fns` hook inside `VanillaKD`'s `chunked_loss` (the student's response-token logits
+   are already materialized there) logging mean per-token |logp_trainer − logp_engine| and a
+   KL proxy, in **every** arm.
+
+**Prerequisite and a correctness fix in its own right:** the trainer currently discards the
+rollout's sampled `output_ids` (used only for `response_length`), re-tokenizes decoded text,
+and appends an EOS that was never sampled (`on_policy_kd_trainer.py:371-385`). Whenever
+decode∘encode is not the identity on the sampled ids, the KD loss is computed on token
+sequences the policy never emitted — a second, adapter-independent mismatch channel that
+contaminates even full-param runs and breaks token alignment for any probe. Build
+`stu_input_ids = prompt_ids + output_ids` and exclude the manual EOS from probe alignment.
+
+**Amend Gate A′ before running it:** three arms — full-param vs OFT vs LoRA at matched
+trainable params (the LoRA arm is *absent* from the fleet: no LoRA row in RUNBOOK Stage 2, no
+`LORA_RANK` knob in `train_branch.sh`, even though KDFlow supports `lora_rank` and the
+independent assessment mandates the LoRA-branch ablation twice — honest-ablation (ii) and the
+revised minimal path). Add a pre-registered mismatch acceptance criterion: the OFT arm's
+engine–trainer KL must sit within a fixed factor (≤2–3×) of the full-param floor, else the
+gate returns "confounded — fix and rerun," not "capacity binding." Bonus: with the probe logged
+in all three arms, the sweep replicates the ORBIT OFT-vs-LoRA mismatch comparison at 1.5B/7B on
+real domains — turning external evidence into an in-repo, citable measurement.
+
+Mechanistically, the leading suspects for OFT > LoRA mismatch (testable on 1 GPU in an
+afternoon, before the cluster window): (i) merge-materialization asymmetry — no engine serves
+OFT natively, so `W = R@W0` must be re-rounded to bf16 whole, and the entrywise-tiny OFT update
+lives exactly in bf16's absorption regime, while LoRA's delta concentrates energy in few
+directions; note `materialize_peft.py` even defaults to doing the merge in bf16 (`--dtype
+bfloat16`); (ii) Cayley numerics — peft is **unpinned** in `KDFlow/pyproject.toml`, so whether
+Gate A′ runs exact Cayley inverse or truncated Cayley–Neumann (only approximately orthogonal)
+is undetermined until install time. Pin it, and log ‖RᵀR−I‖ per block. A useful corollary: the
+ORBIT evidence is effectively an argument **for the existing V2-primary recommendation**
+(commit `b8cee0c`) — V2 trains full-param branches and applies the geometry offline, so no OFT
+weights are ever served and the mismatch channel cannot bite.
+
+---
+
+## 4. Finding R3 — there is still no toy task; promote forced conflict to Stage −1
+
+**The hypothesis, stated once, falsifiably.** It has drifted through three forms: the brief's
+conflict-resolution claim about per-step gradients (killed: per-step geometry collapses to the
+Euclidean average to O(η²)); the addendum's isolate-then-consolidate (per-domain O(1) objects
+merged every K steps); the RUNBOOK's diagnosis-first framing. The falsifiable residue is:
+
+> On K-step per-domain deltas of one student, direction/magnitude-decoupled merging (V2-ORD)
+> yields higher min-over-domains recovery than plain delta averaging / TA at matched budget,
+> **whenever the deltas conflict beyond the split-half noise floor.**
+
+The antecedent — measurable conflict — has never been observed in this project (Iter2: 5/5
+domains positive, with the very teachers now on the roster), which dictates the toy design.
+
+**Why the current plan fails the Park standard.** After the assessment's kills, the surviving
+method content lives entirely in a merge operator applied to O(1) deltas. That needs branch
+deltas that measurably conflict, the 8 already-implemented operators, and an eval — not a
+40-H100 fleet. Yet the RUNBOOK spends its whole GPU budget generating *natural* branches whose
+pre-registered expected reading is "no conflict, operators tie" (uninformative about the
+mechanism), while the one setting where the idea should work **by construction** — the
+forced-conflict positive control the assessment itself demanded ("prove the instruments fire
+before trusting any stop reading") — appears nowhere in the RUNBOOK. `demo_synthetic.py` is a
+toy in costume: right structure, but no task, no loss, no eval — no operator can win or lose.
+
+**The analogy to Kwanyoung's example is exact.** Privileged world model = conflict guaranteed
+true by construction (shared low-rank adapter bottleneck + imbalanced mixture + elevated lr on
+a format-conflicting pair). Easiest maze = the smallest scale at which OPD demonstrably runs —
+which is the user's own ORBIT stack: 0.5B student, 1.5B teachers, GSM8K.
+
+**Stage −1 spec (1–2 GPUs, hours-to-a-day, runs on hardware already in hand):** student
+Qwen2.5-0.5B-Instruct; two ~1.5B teachers engineered into format-conflicting specialists (e.g.
+boxed-CoT math vs strict-JSON tool calls) on overlapping prompts; shared low-rank adapter
+(forces interference through one block *and* shrinks the merge to adapter-sized matrices);
+K-step per-domain branches; then the **real** `offline_merge_bakeoff.py` (all 8 operators) +
+`delta_diagnostics.py` + `paired_compare.py`; decide on min-over-2-domains. Add OFT and LoRA
+arms with the mismatch probe on — Gate A′'s capacity axis and NOTES ablation (ii) get answered
+here essentially for free. A unique extra: sweep conflict severity to get the dose–response
+curve ("where does geometry start paying?") that no fleet run can produce.
+
+**Pre-registered gate for the fleet's method arms:** proceed only if (i) the diagnostics
+demonstrably fire on the manufactured conflict, and (ii) some geometric operator beats
+`plain_avg`/`ta` there (paired, 95%). The value is asymmetric, and that is the point: a loss
+under *guaranteed* conflict is a near-sufficient kill of the geometric arm at ~1/100th the
+fleet's cost; a win converts the expensive sweep into a prevalence measurement — and the
+diagnosis paper ("when does MOPD need more than a weighted sum?") survives either outcome. A
+forced-conflict win does **not** validate the natural-setting claim; the fleet's job remains
+measuring conflict prevalence at scale.
+
+---
+
+## 5. Sweep audit — information per GPU-hour, and what to cut, defer, or add
+
+Ranked (highest first): (1) Stages 4–5, bake-off + diagnostics — already built, hours, the true
+home of the hypothesis, gated only on having branches; (2) the missing Stage −1 toy; (3) the
+missing sync fix + mismatch probe (without them the 16-GPU OFT block produces garbage, and even
+full-param branches carry the unmeasured retokenize/phantom-EOS channel); (4) Stage 0 screening
+— but `scripts/kl_screen.py` cannot deliver the promised teacher-native-template screen (it
+applies one chat template and teacher-forces all teachers over student-tokenized ids), so the
+Finding-4 elicitation artifact would survive the re-run; fix or strike the promise; (5) Stage 2
+shrunk to math+medical full-param + split-halves (4 jobs, not 12 — the Handoff itself says
+"start with 2 teachers, then scale"); (6) Stage 6 eval — **blocked**: no harness exists to emit
+the per-problem `{id, correct}` JSONL that every pre-registered kill rule consumes;
+`paired_compare.py` is a consumer with no producer. This is the only wholly missing layer and
+must be built before any decision rule is read; (7) the remaining 3 branches + lr probe;
+(8) KDFlow OFT branches (invalid until §2's fix); (9) the Stage-3 weighted grid — lowest: the
+uniform arm re-answers what Iter2 answered (keep it early only as the engine-migration anchor);
+the "tuned opponent" matters only if some operator first separates from `plain_avg` in a
+bake-off.
+
+Also add: `LORA_RANK` knob in `train_branch.sh` (~5 lines; `model.py:66-67` already enforces
+mutual exclusion with OFT); CLI exposure of the implemented-but-unreachable TIES-on-residual
+variant of `v2_ord` (otherwise the pre-registered bake-off silently tests only the TA-residual
+reading of Weiyang's magnitude fork); a CaMOPD-style alternating-update arm at toy scale (the
+assessment's "cheapest competitor" — if it matches the geometric merge under forced conflict,
+the novelty claim dies cheaply); pin `peft` in `KDFlow/pyproject.toml`; and an optional 1-job
+off-policy calibration control (full-param OPD with sync deliberately disabled) to price pure
+off-policyness in pp at this scale.
+
+Fork-independent arms — the 5 full-param branches, split-halves, and the uniform multi-teacher
+run — use the working sync path and feed every future decision; launch those on the time-limited
+allocation without waiting on anything above except the Stage-6 harness.
+
+---
+
+## 6. Meta-lessons — planning idea → validation without an advisor
+
+The user's actual question ("how do I independently plan the path from a high-level idea to
+something that can be validated in the most promising way?") is answered by this project's own
+history, in both directions.
+
+**What worked — the falsification ladder.** After the Iter1 collapse, the team did not tune
+hyperparameters; it ran Control A (cheap KL screen → math-yukang a 400× outlier), Control B
+(single-teacher ablation → eliminated the multi-teacher hypothesis), then a ~5-minute CPU
+inference test → the teacher was a *broken checkpoint emitting only spaces*. Three
+escalating-cheapness probes overturned two wrong hypotheses ("asymmetric signals",
+"reverse-KL mode-seeking") and produced a durable rule (CPU-test every teacher). Design the
+cheapest experiment that can kill your current explanation — that is the advisor-substitute.
+
+**What worked — pre-registration + adversarial self-review.** The 2026-07-10 assessment killed
+two mathematically doomed builds before GPU spend and caught the 4k-RoPE data-poisoning bug in
+passing; the RUNBOOK's kill rules and matched-budget accounting encode the "that comparison is
+unfair" instinct an advisor would supply. But note the timing: the same rigor applied in April
+would have prevented the premise problem entirely.
+
+**What failed — building for an unobserved phenomenon.** The motivating see-saw was assumed,
+never demonstrated; the project's own strongest experiment (Iter2, 5/5 positive) reads against
+it, and the v10 series bounds the headroom of *any* aggregation method (specialized Math-7B
+teacher taught the 1.5B student no more than vanilla 7B did). Rule: before designing the fix,
+run the experiment that demonstrates the disease.
+
+**What failed — infrastructure ahead of validation, twice.** Multi-teacher routing before any
+single-teacher control (May); a full sweep toolkit built in one GPU-less day on top of a sync
+path that is provably broken exactly where Gate A′ lives (July). Rule: the path your hypothesis
+flows through is the first thing to end-to-end test, at the smallest scale that exercises it.
+"Verified in the dev container" verifies that code executes, not that the experiment measures
+what it claims.
+
+**What failed — provenance and dependency hygiene.** Every headline number survives only in git
+commit messages (logs live on the old machine at `/home/ubuntu/MOPD/logs`; v10c/v10d/v7/v9/B0
+numbers were never recorded anywhere); and the plan's OFT de-risking rested on a collaborator's
+unpublished small test while the user's own first-hand OFT evidence sat outside the repo,
+uncited. Rules: commit primary evidence with the code; your own data on a question always
+outranks hearsay about someone else's.
+
+**The standing policy these lessons imply:** no infrastructure for a mechanism that has not
+been observed; every new capability gets a single-variable, smallest-scale, end-to-end
+validation of its hypothesis-critical path before it is scaled or built upon.
+
+---
+
+## 7. Reflection freeze and execution commitment
+
+This document is the third analysis artifact since the last GPU number (2026-05-06). Its
+marginal value is §§2–4; everything else here is consolidation of admissions already on the
+record. The meeting-driven incentive ("by meeting time, have in hand…") rewards polished
+documents about experiments over experiments — that gradient is already being descended.
+
+**Freeze:** no new assessment/addendum documents until the first KDFlow-era GPU numbers are
+committed. Permitted doc changes: recording results; the Gate A′ amendment; RUNBOOK edits
+implementing §5.
+
+**Commitment (in order, smallest hardware first):**
+1. CPU/1-GPU, this week: PEFT sync fix + streamed-key assertion; mismatch probe + token-
+   alignment fix; `LORA_RANK` knob; peft pin; merged-vs-unmerged logit-diff triage for one OFT
+   and one LoRA adapter (fp32 vs bf16 materialization); minimal Stage-6 eval harness
+   (MATH-500 + MedQA emitters at minimum); `kl_screen.py` per-teacher templates or strike the
+   promise; expose `v2_ord(residual='ties')` in the bake-off CLI.
+2. ORBIT-scale Stage −1 toy (1–2 GPUs, ~1 week wall including data prep), pre-registered as in
+   §4 — this gates all geometry-method GPU spend, including the V1/V2/V3 fork itself.
+3. In parallel on the time-limited allocation: Stage 0 screen, then math+medical full-param
+   branches + split-halves + the uniform multi-teacher anchor (fork-independent under every
+   outcome). Real-checkpoint bake-off + diagnostics the day the first two branches exist.
+4. OFT/LoRA branches at 1.5B/7B only after the sync fix passes its single-GPU smoke test and
+   the probe reads near the full-param floor.
+5. Weiyang meeting runs on our evidence: the ORBIT recast (§1), the toy result, the amended
+   three-arm Gate A′, and the V2-primary argument from §3 — with the assessment's three
+   questions to him unchanged.
+
+---
+
+## 8. Honest limitations of this reflection
+
+The SGLang-side failure mode of the PEFT sync (crash vs silent skip) is inferred from the
+trainer-side code, which is confirmed; the engine-side behavior is version-dependent and needs
+the 10-minute smoke test to pin down. The mechanistic ranking of OFT-mismatch causes (§3) is
+hypothesis, not measurement — the afternoon triage decides it. The ORBIT result itself is a
+single-seed, single-setting run and is used here only as a risk flag and a partial capacity
+signal, never as a cleared gate. The verification pass of this review was skipped by request;
+in its place, all cited lines were re-read directly, and the load-bearing chain (§2) twice.
+Finally, this document inherits the assessment's own unresolved caveat: Iter2's all-positive
+reading — the fact that makes the toy-first ordering correct — is itself one single-seed
+80-step run whose primary record is a commit message. Recovering `/home/ubuntu/MOPD/logs` (and
+the v10c/v10d numbers) remains worth an hour of anyone's time.
