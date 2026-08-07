@@ -344,3 +344,83 @@ Finally, this document inherits the assessment's own unresolved caveat: Iter2's 
 reading — the fact that makes the toy-first ordering correct — is itself one single-seed
 80-step run whose primary record is a commit message. Recovering `/home/ubuntu/MOPD/logs` (and
 the v10c/v10d numbers) remains worth an hour of anyone's time.
+
+---
+
+# Addendum (2026-08-07): two corrections and the 4×A100 replan
+
+## Correction 1 — provenance of the OFT/LoRA evidence
+
+The W&B run (`sunday-hao/opd-test-20epoch`) is **another student's** previous, *successful*
+OFT-on-OPD experiment — a reference shared by the advisor — not this project's own run. §1's
+"how to answer the advisor" framing is therefore superseded: the advisor's two questions ("How
+did you approach it? How well did it work?") are addressed to that student, and our action item
+is to **collect their details**: (a) the exact definition of the train–inference mismatch
+metric and its magnitude for OFT vs LoRA; (b) whether the mismatch grew over the 20 epochs
+(compounding — bad for iterated merge) or stayed flat (a constant numerics floor — manageable);
+(c) OFT block size / LoRA rank and the matched trainable-param counts; (d) how OFT weights
+reached the rollout engine (merged per sync? served unmerged? which stack). The W&B workspace
+is not readable anonymously (JS shell) — get an export or the numbers directly.
+
+§6's "own data outranks hearsay" lesson softens accordingly: an inspectable log with a
+reachable author is intermediate provenance — better than an undocumented claim, still not
+load-bearing until replicated. Net positive: there are now **two independent external
+positives** for OFT-on-OPD (this run + Weiyang's small test), and one observed risk (the
+mismatch). The Stage −1 toy replicates both claims at 0.5B scale, in-repo.
+
+## Correction 2 — compute reality: 4× A100-80GB, one node
+
+The RUNBOOK's 40–48-H100 fleet assumption is void. A code-verified feasibility pass
+(placement, memory, wall-clock read directly from KDFlow source) concludes:
+
+- **Everything fits; what is lost is parallelism, not feasibility.** Jobs were sized for 80GB
+  GPUs, and `enable_sleep=True` time-shares each GPU across rollout → teacher → student phases
+  (and across teachers, one awake at a time: `multi_teacher_group.py:74-76`). The fleet
+  becomes a serial queue: ~4–6 weeks for the old program → hence the trimmed plan below.
+- **Single-teacher 1.5B/7B branch (GPUS=4):** fits comfortably; tightest phase is the student
+  update (~55–63GB/GPU, dominated by the KD loss materializing ALL response-token logits in
+  one chunk by default). Wall-clock **2–2.5 days upper bound** per 80-step bs128 branch
+  (anchored scaling); a bottom-up per-phase estimate says 4–8h — a ~10× uncertainty that the
+  Week-1 instrumented smoke run must settle before the schedule is trusted.
+- **Stage −1 toy (0.5B student, two 1.5B teachers):** trivially fits on **2 GPUs**, ~2–4h for
+  80 steps — and KDFlow jobs claim exactly their own placement-group bundles, so the toy can
+  share the node with a 2-GPU job.
+- **5-teacher run:** GPU-feasible via time-sharing, but the hidden constraint is **host RAM**:
+  `enable_weights_cpu_backup=True` gives every engine process a full CPU weight copy — at
+  teacher_tp=1/dp=4 that is 20×15.2GB ≈ 304GB plus rollout/student offload ≈ **~350GB**.
+  Check `free -g` before any 5-teacher launch; fallback `--teacher_tp_size 4` (~76GB).
+- **Bake-off + diagnostics are CPU-only** (verified: no CUDA use in `mopd_merge/`), ~10–16GB
+  RAM, 1–3h per snapshot set — run concurrently with training.
+
+**New latent bugs found during the check (fix in Week 1):**
+1. `train_multiteacher.sh`: `TRAIN_BS=320` but `rollout_batch_size` hardcoded 256 — optimizer
+   steps straddle rollout iterations; effective batch ≠ 320 on any GPU count. Set them equal.
+2. `chunked_loss_size` defaults to one chunk = all response tokens (`vanilla_kd.py:109`),
+   materializing ~40GB of logits + fp32 softmax intermediates per micro-batch
+   (`reverse_kl_div.py:17-19`). Pass `--chunked_loss_size 2048` universally — exact, ~8× cut.
+3. Non-math domains: set `MAX_LEN=6144` explicitly, else the 4096 default silently truncates
+   prompts to 2048 (`data_args.py:71`).
+
+## Revised 6-week schedule (supersedes §7's ladder; toy-first is now strictly dominant —
+nothing runs in parallel anymore, so the toy's kill-power per GPU-hour went UP)
+
+| Week | GPUs | Work |
+|---|---|---|
+| 1 | 0–1 | CPU-week: PEFT sync fix + streamed-key assertion; token-alignment/phantom-EOS fix (**must land before any branch — mid-program loss-semantics changes make runs incomparable**); mismatch probe; LORA_RANK knob; peft pin; ties-residual CLI; Stage-6 eval harness (MATH-500+MedQA JSONL); kl_screen native templates; the 3 bugs above; all data builds. Slivers: teacher health check; 10-min PEFT-sync smoke; `free -g`. |
+| 2 | 2+2 | GPUs 0–1: **Stage −1 forced-conflict toy** (full-param + OFT + LoRA arms, probe on, split-half noise floor, conflict-severity dose-response, real bake-off + diagnostics + paired stats). GPUs 2–3: Stage-0 KL screen, then **instrumented branch smoke** (`--limit 200`, per-phase timings) to collapse the 10× wall-clock uncertainty. Read the toy gate at week's end. |
+| 3 | 4 | Math full-param branch (MAX_LEN=4096), then medical (MAX_LEN=6144). Fork-independent under every toy outcome. |
+| 4 | 4→1 | 2-teacher (math+medical) uniform MT anchor at bs128/rollout128 (replaces the 5-teacher run); real-checkpoint bake-off + diagnostics (CPU, concurrent); Stage-6 evals; first decision-rule readings. |
+| 5 | 4 | **Gated**: math OFT + math LoRA branches (three-arm Gate A′ with mismatch acceptance criterion) — only if sync smoke passed and toy probe read ≤2–3× the full-param floor. Else slack queue: code branch / truncated math split-half. |
+| 6 | flex | Buffer; merge-cadence sweep on step-20/40/60/80 snapshots (CPU); full paired-stats matrix; decision package for the Weiyang meeting. |
+
+**Cut at this budget:** 5-teacher uniform run (→ 2-teacher anchor), weighted-MT grid (→ one
+inverse-loss-norm run only if an operator separates from plain_avg), 1.5B split-halves (→ toy
+-scale noise floor), lr probe (→ collapse monitoring + toy-scale lr arm), code/search/tool
+branches (deferred to slack; code first if conflict shows), medical OFT twin.
+
+**Pre-registered abort:** if the Week-2 instrumented smoke extrapolates a branch to >3 days,
+stop and re-plan the week-3+ queue before launching it — at the pessimistic end weeks 3–5 hold
+exactly three jobs with zero slack.
+
+**Division of labor:** this repo carries the plan, the pointers, and the pre-registered rules;
+the local session on the A100 box executes Week 1 onward and commits results back.
